@@ -4,13 +4,12 @@ from ollama import chat
 class NutritionAssistant:
     def __init__(self, model_name):
         self.model = model_name
-        # Define profile structure
         self.profile = {
             "Nome": None,
-            "Idade": None,
+            "Idade": None,                     # e.g., "22 anos"
             "Género": None,
-            "Altura": None,
-            "Peso": None,
+            "Altura": None,                    # e.g., "175 cm"
+            "Peso": None,                      # e.g., "68 kg"
             "Nível de Atividade Física": None,
             "Alergias": None,
             "Intolerâncias": None,
@@ -18,13 +17,18 @@ class NutritionAssistant:
             "Preferências Dietéticas": None,
             "Objetivos de Saúde": None
         }
-        self.history = []  # Conversation history
-        # Ordered list of profile fields to collect
+        self.history = []
         self.fields_order = list(self.profile.keys())
         self.current_field_index = 0
 
+        # Default units for fields
+        self.default_units = {
+            "Idade": "anos",
+            "Altura": "cm",
+            "Peso": "kg"
+        }
+
     def next_field(self):
-        """Return the next unset profile field, or None if all set."""
         while self.current_field_index < len(self.fields_order):
             field = self.fields_order[self.current_field_index]
             if not self.profile[field]:
@@ -33,11 +37,39 @@ class NutritionAssistant:
         return None
 
     def update_profile_field(self, field, value):
-        """Set a specific profile field."""
-        self.profile[field] = value.strip()
+        v = value.strip()
+        # Add default unit if missing
+        if field in self.default_units:
+            unit = self.default_units[field]
+            if not re.search(rf"\b{unit}\b", v, re.IGNORECASE):
+                v = f"{v} {unit}"
+        self.profile[field] = v
+
+    def detect_update_command(self, user_input):
+        """
+        Improved regex to catch update commands even with filler words.
+        Matches phrases like:
+         - "atualiza o meu peso para 66 kg"
+         - "podes atualizar minha altura para 180 cm?"
+        """
+        pattern = re.compile(
+            r"\b(?:atualiz(?:ar|e|a))\b.*?\b("
+            + "|".join([re.escape(f) for f in self.profile.keys()]) +
+            r")\b.*?\b(?:para|com)\b\s*(?P<value>[\d.,]+\s*\w+)",
+            flags=re.IGNORECASE
+        )
+        match = pattern.search(user_input)
+        if match:
+            field = match.group(1).strip().capitalize()
+            value = match.group("value").strip()
+            # Normalize field key
+            for key in self.profile:
+                if key.lower() == field.lower():
+                    return key, value
+        return None, None
+
 
     def profile_block(self):
-        """Serialize profile for context injection."""
         lines = ["Perfil do Utilizador:"]
         for k, v in self.profile.items():
             if v:
@@ -45,49 +77,48 @@ class NutritionAssistant:
         return "\n".join(lines) + "\n\n" if any(self.profile.values()) else ""
 
     def sanitize_response(self, text):
-        """Ensure disclaimer and domain limitation."""
-        disclaimer = "\n\n**Isto não substitui uma consulta com um nutricionista ou profissional de saúde. Para orientações clínicas específicas, consulte um especialista.**"
+        disclaimer = ("\n\n**Isto não substitui uma consulta com um nutricionista ou profissional de saúde. "
+                      "Para orientações clínicas específicas, consulte um especialista.**")
         if disclaimer not in text:
             text += disclaimer
+        # block out-of-domain
         forbidden = ["alcoólico", "cocktail", "prescrição farmacológica"]
         if any(word in text.lower() for word in forbidden):
             return "Desculpe, o meu foco restringe-se apenas em nutrição e hábitos saudáveis." + disclaimer
         return text
 
     def ask(self, user_input):
-        # Check if still collecting profile
+        # Check for update command when profile complete
+        if self.next_field() is None:
+            field, value = self.detect_update_command(user_input)
+            if field:
+                self.update_profile_field(field, value)
+                reply = f"{field} atualizado para {self.profile[field]}."
+                self.history.extend([("user", user_input), ("assistant", reply)])
+                return reply
+
+        # Collect profile fields sequentially
         field = self.next_field()
         if field:
-            # Collect this field
             self.update_profile_field(field, user_input)
             self.history.append(("user", user_input))
-            # Move index to next for subsequent calls
             self.current_field_index += 1
-            # Ask for next field
             next_f = self.next_field()
-            if next_f:
-                reply = f"Por favor, indica o teu(a) **{next_f}**:"
-            else:
-                reply = "Obrigado! Agora que tenho o teu perfil, em que posso ajudar-te em nutrição?"
+            reply = (f"Por favor, indica o teu(a) **{next_f}**:"
+                     if next_f else
+                     "Obrigado! Agora que tenho o teu perfil, em que posso ajudar-te em nutrição?")
             self.history.append(("assistant", reply))
             return reply
 
-        # All profile collected: process normal conversation
-        # Build messages with profile context
-        system_ctx = self.profile_block()
-        messages = [{"role": "system", "content": system_ctx},
+        # Normal chat with profile injected
+        messages = [{"role": "system", "content": self.profile_block()},
                     {"role": "user", "content": user_input}]
-        # Call the model
         response = chat(model=self.model, messages=messages)
-        reply = response['message']['content']
-        # Sanitize and log
-        reply = self.sanitize_response(reply)
-        self.history.append(("user", user_input))
-        self.history.append(("assistant", reply))
+        reply = self.sanitize_response(response['message']['content'])
+        self.history.extend([("user", user_input), ("assistant", reply)])
         return reply
 
     def save_history(self, filename="conversation_history.txt"):
-        """Save conversation history."""
         with open(filename, "w", encoding="utf-8") as f:
             for role, message in self.history:
                 f.write(f"{role.title()}: {message}\n\n")
@@ -95,7 +126,6 @@ class NutritionAssistant:
 if __name__ == "__main__":
     assistant = NutritionAssistant("nutri-assistant-v2:latest")
     print("Olá! Sou o teu Assistente de Nutrição. Escreve 'sair' para terminar.")
-    # Prompt for the first field
     first_field = assistant.next_field()
     print(f"Assistente: Por favor, indica o teu(a) **{first_field}**:")
 
@@ -108,3 +138,4 @@ if __name__ == "__main__":
         reply = assistant.ask(user_input)
         print(f"Assistente: {reply}\n")
 
+    print("Histórico guardado em 'conversation_history.txt'.")
