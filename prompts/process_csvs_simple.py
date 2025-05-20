@@ -16,8 +16,11 @@ def build_docs(food_csv="food.csv",
     3. Group by food item, concatenate nutrient lines
     4. Save DataFrame to pickle
     """
+    #categorias a serem consideradas:
+    categories_filter = [3,5,6,7,8,9,10,12,13,15,16,17,19,20,22]
     # 1. Load minimal columns
-    food = pd.read_csv(food_csv, usecols=["fdc_id", "description"])
+    food = pd.read_csv(food_csv, usecols=["fdc_id", "description", "food_category_id"])
+    food = food[food["food_category_id"].isin(categories_filter)]
     nutr = pd.read_csv(nutrient_csv, usecols=["id", "name", "unit_name"])
     nutr.rename(columns={"id":"nutrient_id", "name":"nutrient_name"}, inplace=True)
     fn = pd.read_csv(food_nutrient_csv, usecols=["fdc_id", "nutrient_id", "amount"])
@@ -68,6 +71,7 @@ def build_index(docs_df,
     print(f"Saved vectorizer -> {vectorizer_path}, index -> {index_path}, docs -> {tfidf_path}")
     return index, vectorizer
 
+#versao boa para prota
 def retrieve_rag(
     query, k=5,
     vectorizer_path="vectorizer.pkl",
@@ -75,36 +79,65 @@ def retrieve_rag(
     tfidf_path="tfidf_docs.pkl",
     min_protein=10.0
 ):
-    import pickle, faiss
-    import pandas as pd
+    import pickle, faiss, pandas as pd, re
+
     # 1) Carregar artefatos
-    with open(vectorizer_path, "rb") as f: vectorizer = pickle.load(f)
+    with open(vectorizer_path, "rb") as f:
+        vectorizer = pickle.load(f)
     index = faiss.read_index(index_path)
-    docs = pd.read_pickle(tfidf_path)
+    docs_df = pd.read_pickle(tfidf_path)
 
-    # 2) Vetorizar e recuperar 10*k candidatos
-    q = vectorizer.transform([query]).toarray().astype("float32")
-    D,I = index.search(q, k*10)
-    candidates = docs.iloc[I[0]].copy()
+    # 2) Expandir query para português
+    query_pt = f"{query} proteína magra gordura baixa"
+    q_vec = vectorizer.transform([query_pt]).toarray().astype("float32")
 
-    # 3) Extrair valor numérico de proteína do texto
-    def extract_protein(text):
-        m = re.search(r"Protein:\s*([\d.]+)", text)
+    # 3) Recuperar 20×k candidatos
+    D, I = index.search(q_vec, k * 20)
+    candidates = docs_df.iloc[I[0]].copy()
+
+    # 4) Extrair proteína
+    def extract_prot(text):
+        m = re.search(r"Protein[:\s]+([\d.]+)", text)
         return float(m.group(1)) if m else 0.0
+    candidates.loc[:, "ProteinValue"] = candidates["text"].apply(extract_prot)
 
-    candidates["ProteinValue"] = candidates["text"].apply(extract_protein)
+    # 5) Blacklist de termos não desejados
+    blacklist = r"bear|owl|game meat|herring|dried|canned|squirrel"
+    mask_blacklist = ~candidates["description"].str.lower().str.contains(blacklist)
 
-    # 4) Filtrar bebidas e proteína insuficiente
-    candidates = candidates[
+    # 6) Whitelist de termos úteis
+    whitelist = r"chicken|salmon|tuna|lentil|tofu|egg|beef|pork|yogurt|turkey|meat"
+    mask_whitelist = candidates["description"].str.lower().str.contains(whitelist)
+
+    # 7) Aplica todos os filtros
+    filtered = candidates[
         (candidates["ProteinValue"] >= min_protein) &
-        (~candidates["description"].str.lower().str.contains("wine|beverage|drink"))
-    ]
+        mask_whitelist &
+        mask_blacklist
+    ].copy()
 
-    # 5) Ordenar por proteína descendente e pegar top k
-    top = candidates.sort_values("ProteinValue", ascending=False).head(k)
+    # Define uma lista de padrões principais
 
-    # 6) Formatar
+
+    def make_key(desc):
+        patterns = ["tofu", "chicken", "salmon", "tuna", "lentil", "egg", "beef", "pork", "yogurt", "turkey","meat"]
+        low = desc.lower()
+        for pat in patterns:
+            if pat in low:
+                return pat
+        # fallback ao nome antes da vírgula
+        return low.split(",", 1)[0].strip()
+
+    filtered.loc[:, "group_key"] = filtered["description"].apply(make_key)
+    filtered = filtered.drop_duplicates(subset=["group_key"])
+
+    # 9) Ordena por proteína e seleciona top k
+    top = filtered.sort_values("ProteinValue", ascending=False).head(k)
+
+    # 10) Retorna description, text e ProteinValue
     return top[["description", "text", "ProteinValue"]]
+
+
 
 if __name__ == "__main__":
     # Build pipeline
@@ -112,7 +145,7 @@ if __name__ == "__main__":
     #idx, vec = build_index(docs)
 
     # Test retrieval
-    sample = retrieve_rag("protein sources low fat", k=6)
+    sample = retrieve_rag("Vitamin C sources low fat", k=20)
     print("Top 3 RAG results:")
     for _, row in sample.iterrows():
         print(f"{row.description}\n{row.text}\n---")
