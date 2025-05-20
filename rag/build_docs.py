@@ -5,7 +5,7 @@ import pandas as pd
 # 1. Carregar os CSVs mínimos
 food = pd.read_csv("food.csv", usecols=["fdc_id","description","food_category_id"])
 nutr = pd.read_csv("nutrient.csv", usecols=["id","name","unit_name"])
-fn   = pd.read_csv("food_nutrient.csv", usecols=["fdc_id","nutrient_id","amount"])
+fn   = pd.read_csv("../prompts/food_nutrient.csv", usecols=["fdc_id", "nutrient_id", "amount"])
 
 # 2. Renomear colunas para merge
 nutr.rename(columns={"id":"nutrient_id","name":"nutrient_name"}, inplace=True)
