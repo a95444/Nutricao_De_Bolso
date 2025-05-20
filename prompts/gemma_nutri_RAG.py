@@ -93,53 +93,52 @@ class NutritionAssistant:
         return text
 
     def ask(self, user_input: str) -> str:
-        # 1) Handle profile updates
+        # 1) Se perfil completo, checa comandos de atualização
         if self.next_field() is None:
-            field, value = self.detect_update_command(user_input)
-            if field:
-                self.update_profile_field(field, value)
-                reply = f"{field} atualizado para {self.profile[field]}."
-                self.history.extend([("user", user_input), ("assistant", reply)])
-                return reply
+            fld, val = self.detect_update_command(user_input)
+            if fld:
+                self.update_profile_field(fld, val)
+                rep = f"{fld} atualizado para {self.profile[fld]}."
+                self.history += [("user", user_input), ("assistant", rep)]
+                return rep
 
-        # 2) Collect profile fields
-        field = self.next_field()
-        if field:
-            self.update_profile_field(field, user_input)
+        # 2) Ainda colecionando perfil
+        fld = self.next_field()
+        if fld:
+            self.update_profile_field(fld, user_input)
             self.history.append(("user", user_input))
             self.current_field_index += 1
-            next_f = self.next_field()
-            if next_f:
-                reply = f"Por favor, indica o teu(a) **{next_f}**:"
-            else:
-                reply = "Obrigado! Agora que tenho o teu perfil, em que posso ajudar-te em nutrição?"
-            self.history.append(("assistant", reply))
-            return reply
+            nxt = self.next_field()
+            rep = (f"Por favor, indica o teu(a) **{nxt}**:"
+                   if nxt else
+                   "Obrigado! Agora que tenho o teu perfil, em que posso ajudar-te?")
+            self.history.append(("assistant", rep))
+            return rep
 
-        # 3) Profile complete → perform RAG retrieval
-        docs = retrieve_rag(user_input, k=3)
-        rag_ctx = "\n\n".join(
-            f"Alimento: {row.description}\n"
-            f"Proteína: {self.extract_nutrient(row.text, 'Protein')}g\n"
-            f"Calorias: {self.extract_nutrient(row.text, 'Energy')}kcal"
-            for _, row in docs.iterrows()
-        )
+        # 3) Perfil completo → RAG puro
+        self.history.append(("user", user_input))
+        docs = retrieve_rag(user_input, k=10)  # DataFrame com ['description','text',<col>]
 
-        print(f"RAGXTX:{rag_ctx}")
-
-        # 4) Build messages with profile and RAG context
-        messages = [
+        # 4) Montar contexto RAG "cru"
+        rag_ctx = []
+        for _, row in docs.iterrows():
+            desc = row["description"]
+            txt = row["text"]
+            rag_ctx.append(f"===\nAlimento: {desc}\n{txt}")
+        rag_block = "\n\n".join(rag_ctx)
+        print(f"RAG_cTX: {rag_ctx}")
+        # 5) Chamar LLM com perfil + dados
+        system_msgs = [
             {"role": "system", "content": self.profile_block()},
-            {"role": "system", "content": "Use APENAS os dados nutricionais fornecidos abaixo:\n\n" + rag_ctx},
-            {"role": "user", "content": user_input}
+            {"role": "system", "content":
+                "Tem em conta APENAS estes dados nutricionais para responder:\n\n" + rag_block}
         ]
+        user_msg = {"role": "user", "content": user_input}
 
-        # 5) Query LLM
-        response = chat(model=self.model, messages=messages)
-        reply = self.sanitize_response(response["message"]["content"])
-        self.history.extend([("user", user_input), ("assistant", reply)])
+        resp = chat(model=self.model, messages=system_msgs + [user_msg])
+        reply = self.sanitize_response(resp["message"]["content"])
+        self.history.append(("assistant", reply))
         return reply
-
     def save_history(self, filename="conversation_history.txt"):
         with open(filename, "w", encoding="utf-8") as f:
             for role, message in self.history:

@@ -4,246 +4,216 @@ import faiss
 import numpy as np
 import pickle
 import re
+# Simple RAG pipeline for nutrition dataset
 
-# Configurações otimizadas
-NUTRIENT_PRIORITY = {
-    'Protein': 5, 'Total lipid (fat)': 4, 'Carbohydrate': 2,
-    'Fiber': 2, 'Energy': 3, 'Sugars, Total': 1
-}
-
-BLACKLISTED_KEYWORDS = {
-    'powder', 'instant', 'beverage', 'artificial', 'processed',
-    'concentrate', 'fortified', 'supplement', 'drink', 'shake'
-}
-
-VALID_CATEGORIES = {
-    'Fresh Meat': [1, 2],  # Carnes frescas
-    'Fresh Fish': [3],  # Peixes frescos
-    'Natural Dairy': [4],  # Laticínios naturais
-    'Legumes': [5]  # Leguminosas
-}
-
-
-def convert_energy_units(df):
-    """Padroniza todas as unidades de energia para kcal/100g"""
-    energy_mask = df['nutrient_name'].str.contains('Energy', case=False)
-
-    # Converter kJ para kcal onde necessário
-    df.loc[energy_mask & (df['unit_name'] == 'kJ'), 'amount'] = df['amount'] / 4.184
-    df.loc[energy_mask, 'unit_name'] = 'kcal'
-
-    return df
-
-
-def filter_processed_foods(description):
-    """Filtra alimentos ultraprocessados pela descrição"""
-    desc_lower = description.lower()
-    return not any(keyword in desc_lower for keyword in BLACKLISTED_KEYWORDS)
-
-
-def normalize_serving(group):
-    """Normaliza todos os nutrientes registrados no grupo para base 100 g."""
-    description = group['description'].iloc[0].lower()
-
-    # Extrair tamanho da porção da descrição (ex: "porção de 50g")
-    serving_match = re.search(r'(\d+)\s*g', description)
-    if serving_match:
-        serving_size = float(serving_match.group(1))
-        scaling_factor = 100 / serving_size
-
-        # Aplicar escala a toda a coluna 'amount'
-        group.loc[:, 'amount'] = group['amount'] * scaling_factor
-
-    return group
-
-def validate_nutrients(row):
-    """Validação rigorosa do perfil nutricional"""
-    try:
-        protein = row.get('Protein', 0)
-        fat = row.get('Total lipid (fat)', 0)
-        energy = row.get('Energy', 0)
-
-        # Critérios de qualidade
-        valid = (
-                protein >= 10 and  # Mínimo 10g de proteína
-                fat <= protein / 2 and  # Máximo metade da proteína em gordura
-                energy <= 300 and  # Máximo 300kcal/100g
-                protein / energy >= 0.3  # Pelo menos 30% das calorias de proteína
-        )
-        return valid
-    except Exception as e:
-        print(f"Erro na validação: {e}")
-        return False
-
-
-def build_docs(
+def build_docs_wide(
         food_csv="food.csv",
         nutrient_csv="nutrient.csv",
         food_nutrient_csv="food_nutrient.csv",
-        docs_path="fdc_docs.pkl"
+        docs_path="docs_wide.pkl"
 ):
-    # Carregar e processar dados
+    # 1) Definir categorias a considerar
+    categories_filter = [3, 5, 6, 7, 8, 9, 10, 12, 13, 15, 16, 17, 19, 20, 22]
+
+    # 2) Carregar food com filtro de categorias
     food = pd.read_csv(food_csv, usecols=["fdc_id", "description", "food_category_id"])
-    nutrient = pd.read_csv(nutrient_csv, usecols=["id", "name", "unit_name"])
-    nutrient.rename(columns={"id": "nutrient_id", "name": "nutrient_name"}, inplace=True)
+    food = food[food["food_category_id"].isin(categories_filter)]
 
-    fn = pd.read_csv(food_nutrient_csv)
-
-    # Pipeline modificado
-    df = (
-        fn.merge(food, on="fdc_id")
-        .merge(nutrient, on="nutrient_id")
-        .pipe(convert_energy_units)
+    # 3) Carregar nutriente
+    nutr = (
+        pd.read_csv(nutrient_csv, usecols=["id", "name", "unit_name"])
+        .rename(columns={"id": "nutrient_id", "name": "nutrient_name"})
     )
 
-    # Aplicar normalização por grupo
-    df = df.groupby("fdc_id").apply(normalize_serving)
+    # 4) Carregar food_nutrient
+    fn = pd.read_csv(food_nutrient_csv, usecols=["fdc_id", "nutrient_id", "amount"])
 
-    # Filtrar categorias e processados
-    valid_cats = [cat for cats in VALID_CATEGORIES.values() for cat in cats]
-    df = df[
-        df["food_category_id"].isin(valid_cats) &
-        df['description'].apply(filter_processed_foods)
-        ]
+    # 5) Merge
+    df = fn.merge(food, on="fdc_id").merge(nutr, on="nutrient_id")
 
-    docs = []
-    for fdc_id, group in df.groupby("fdc_id"):
-        nutrient_data = {}
-        nutrients = []
+    # 6) Pivot para wide (cada nutriente numa coluna)
+    pivot = (
+        df.pivot_table(
+            index=["fdc_id", "description"],
+            columns="nutrient_name",
+            values="amount",
+            aggfunc="first"
+        )
+        .reset_index()
+    )
 
-        for _, row in group.iterrows():
-            nutrient_name = row['nutrient_name']
-            amount = round(row['amount'], 2)
-            unit = row['unit_name']
+    # 7) Reconstruir o campo 'text' para exibição
+    #    – Listamos cada nutriente com valor + unidade
+    def make_text(row):
+        lines = []
+        for nut in pivot.columns[2:]:
+            val = row.get(nut)
+            if pd.notna(val):
+                unit = nutr.loc[nutr.nutrient_name == nut, "unit_name"].iat[0]
+                lines.append(f"{nut}: {val} {unit}")
+        return "\n".join(lines)
 
-            # Repetir nutrientes prioritários
-            repeats = NUTRIENT_PRIORITY.get(nutrient_name, 1)
-            nutrients.extend([f"{nutrient_name}: {amount} {unit}"] * repeats)
+    pivot["text"] = pivot.apply(make_text, axis=1)
 
-            nutrient_data[nutrient_name] = amount
-
-        # Normalizar por 100g
-        #nutrient_data = normalize_serving(nutrient_data)
-
-        # Validação final
-        if validate_nutrients(nutrient_data):
-            docs.append({
-                "id": int(fdc_id),
-                "description": re.sub(r'\s+', ' ', group["description"].iloc[0]).strip(),
-                "text": " ".join(sorted(
-                    nutrients,
-                    key=lambda x: NUTRIENT_PRIORITY.get(x.split(':')[0].strip(), 0),
-                    reverse=True
-                )),
-                **nutrient_data
-            })
-
-    docs_df = pd.DataFrame(docs)
-    docs_df.to_pickle(docs_path)
-    print(f"✅ Documentos salvos em '{docs_path}' ({len(docs_df)} itens)")
-    return docs_df
-
-
-def build_tfidf_index(
-        docs_df,
-        max_features=10000,
-        index_path="tfidf_index.faiss",
-        vectorizer_path="tfidf_vectorizer.pkl",
-        docs_path="tfidf_docs.pkl"
-):
+    # 8) Guardar
+    pivot.to_pickle(docs_path)
+    print(f"✅ Documentos salvos em '{docs_path}' com {len(pivot)} itens.")
+    return pivot
+def build_index(docs_df,
+                vectorizer_path="vectorizer.pkl",
+                index_path="index.faiss",
+                tfidf_path="tfidf_docs.pkl",
+                max_features=5000):
+    """
+    1. Fit TF-IDF on docs_df['text']
+    2. Build FAISS index
+    3. Save vectorizer, index, and docs_df
+    """
     texts = docs_df["text"].tolist()
+    vectorizer = TfidfVectorizer(max_features=max_features)
+    tfidf = vectorizer.fit_transform(texts).astype(np.float32)
 
-    vectorizer = TfidfVectorizer(
-        max_features=max_features,
-        ngram_range=(1, 3),
-        token_pattern=r'(?u)\b[\w.:/]+\b',
-        stop_words=None
-    )
+    # FAISS
+    d = tfidf.shape[1]
+    index = faiss.IndexFlatL2(d)
+    index.add(tfidf.toarray())
 
-    tfidf_matrix = vectorizer.fit_transform(texts).astype(np.float32)
-    index = faiss.IndexFlatL2(tfidf_matrix.shape[1])
-    index.add(tfidf_matrix.toarray())
-
-    faiss.write_index(index, index_path)
+    # Save artifacts
     with open(vectorizer_path, "wb") as f:
         pickle.dump(vectorizer, f)
-    docs_df.to_pickle(docs_path)
+    faiss.write_index(index, index_path)
+    docs_df.to_pickle(tfidf_path)
 
-    print(f"✅ Índice TF-IDF/FAISS salvo em '{index_path}'")
+    print(f"Saved vectorizer -> {vectorizer_path}, index -> {index_path}, docs -> {tfidf_path}")
     return index, vectorizer
 
-
+#versao boa para prota
 def retrieve_rag(
-        query,
-        k=5,
-        index=None,
-        vectorizer=None,
-        docs_df=None,
-        nutrient_filters=None
+    query, k=5,
+    vectorizer_path="vectorizer.pkl",
+    index_path="index.faiss",
+    tfidf_path="tfidf_docs.pkl",
+    min_protein=10.0,
+    min_nutrient=1.0
 ):
-    # Filtros nutricionais rigorosos
-    default_filters = {
-        'Protein': lambda x: x >= 15,
-        'Total lipid (fat)': lambda x: x <= 8,
-        'Energy': lambda x: x <= 250,
-        'Carbohydrate': lambda x: x <= 10
+    import pickle, faiss, pandas as pd, re
+
+    # 1) Carregar artefatos
+    with open(vectorizer_path, "rb") as f:
+        vectorizer = pickle.load(f)
+    index = faiss.read_index(index_path)
+    docs_df = pd.read_pickle(tfidf_path)
+
+    # 2) Detectar nutriente na query (simplesmente procura “vitamina c”, “proteína”, “ferro”...)
+    nutrient_map = {
+        # Macronutrientes
+        r"prote[íi]na": "Protein",
+        r"lip[íi]dio(s)?": "Total lipid (fat)",
+        r"gordur(a|as)": "Total lipid (fat)",
+        r"hidrato(s)? de carbono": "Carbohydrate, by difference",
+        r"carboidrato(s)?": "Carbohydrate, by difference",
+        r"fibra": "Fiber, total dietary",
+        r"energia": "Energy",
+        r"caloria(s)?": "Energy",
+        r"álcool": "Alcohol, ethyl",
+
+        # Minerais principais
+        r"ferro": "Iron, Fe",
+        r"c[áa]lcio": "Calcium, Ca",
+        r"sódio": "Sodium, Na",
+        r"pot[áa]ssio": "Potassium, K",
+        r"magnesi(o|u)m": "Magnesium, Mg",
+        r"zinco": "Zinc, Zn",
+        r"fosforo": "Phosphorus, P",
+        r"cobre": "Copper, Cu",
+        r"s[ée]lenio": "Selenium, Se",
+        r"magn[eê]sio": "Magnesium, Mg",
+        r"manganês": "Manganese, Mn",
+
+        # Vitaminas
+        r"vitamina\s*a\b": "Vitamin A, IU",
+        r"vitamina\s*d\b": "Vitamin D (D2 + D3)",
+        r"vitamina\s*e\b": "Vitamin E (alpha-tocopherol)",
+        r"vitamina\s*k\b": "Vitamin K (phylloquinone)",
+        r"vitamina\s*c\b": "Vitamin C, total ascorbic acid",
+        r"vitamina\s*b1\b": "Thiamin",
+        r"vitamina\s*b2\b": "Riboflavin",
+        r"vitamina\s*b3\b": "Niacin",
+        r"vitamina\s*b5\b": "Pantothenic acid",
+        r"vitamina\s*b6\b": "Vitamin B-6",
+        r"vitamina\s*b7\b": "Biotin",
+        r"vitamina\s*b9\b": "Folate, total",
+        r"vitamina\s*b12\b": "Vitamin B-12",
+
+        # Ácidos gordos
+        r"trans": "Fatty acids, total trans",
+        r"saturad[oa]s": "Fatty acids, total saturated",
+        r"monoinsaturad[oa]s": "Fatty acids, total monounsaturated",
+        r"poliinsaturad[oa]s": "Fatty acids, total polyunsaturated",
+
+        # Outros
+        r"a[çc]úcar": "Sugars, Total",
+        r"colesterol": "Cholesterol",
+        r"agua|água": "Water",
+        r"cinco principal": "Ash"
     }
 
-    # Expandir query com sinônimos
-    query_expanded = f"{query} proteína magra baixa gordura natural fonte"
-    q_vec = vectorizer.transform([query_expanded]).toarray().astype(np.float32)
+    def detect_nutrient(query: str):
+        for pattern, column in nutrient_map.items():
+            if re.search(pattern, query, flags=re.IGNORECASE):
+                return column
+        return None
 
-    # Busca com janela ampliada
-    _, I = index.search(q_vec, k * 10)
-    results = docs_df.iloc[I[0]].copy()
 
-    # Aplicar filtros dinamicamente
-    filters = nutrient_filters or default_filters
-    for nutrient, condition in filters.items():
-        if nutrient in results.columns:
-            results = results[results[nutrient].apply(condition)]
+    target_nutrient = detect_nutrient(query)
 
-    # Ordenação por qualidade nutricional
-    results = results.assign(
-        protein_ratio=results['Protein'] / results['Total lipid (fat)']
-    ).sort_values(
-        by=['protein_ratio', 'Protein'],
-        ascending=[False, False]
-    ).head(k)
+    # 3) Expandir query para português e vetorizar
+    #query_pt = f"{query} proteína magra gordura baixa"
+    q_vec = vectorizer.transform([query]).toarray().astype("float32")
 
-    # Formatar resultados
-    results['formatted'] = results.apply(
-        lambda r: (
-            f"{r.description}\n"
-            f"▶ Proteína: {r.Protein}g | "
-            f"▶ Gordura: {r['Total lipid (fat)']}g | "
-            f"▶ Calorias: {r.Energy}kcal\n"
-            f"▶ Densidade Proteica: {r.Protein / r.Energy:.2f}g/kcal"
-        ), axis=1
-    )
+    # 4) Recuperar 20×k candidatos
+    D, I = index.search(q_vec, k * 20)
+    candidates = docs_df.iloc[I[0]].copy()
 
-    return results[['formatted', 'text']]
+    # 5) Extrair valores numéricos de nutrientes (passes a ter todas as colunas no docs_df!)
+    #    Aqui assumimos que tens uma coluna por nutriente, ex. docs_df["Vitamin C, total ascorbic acid"]
+    #    Se não tiveres, precisarás de parsear o campo "text" para extrair
+    if target_nutrient and target_nutrient in docs_df.columns:
+        # Filtrar quem tem valor >= min_nutrient nesse nutriente
+        #print(f"ESTÁ NA COLUNA {target_nutrient}")
+        candidates = candidates[candidates[target_nutrient] >= min_nutrient]
+    else:
+        # Caso contrário, mantém o filtro de proteína original
+        def extract_prot(text):
+            m = re.search(r"Protein[:\s]+([\d.]+)", text)
+            return float(m.group(1)) if m else 0.0
+        candidates.loc[:, "ProteinValue"] = candidates["text"].apply(extract_prot)
+        candidates = candidates[candidates["ProteinValue"] >= min_protein]
+
+    # 6) Aplicar blacklist/whitelist e deduplicação se quiseres
+    #    (igual ao que já tinhas: make_key + drop_duplicates)
+
+    # 7) Por fim, ordenar e devolver os top-k
+    #    Podes ordenar pelo valor do nutriente alvo, ou pela proteína se for fallback
+
+    # Exemplo de ordenação pelo nutriente alvo:
+    if target_nutrient and target_nutrient in docs_df.columns:
+        top = candidates.sort_values(by=target_nutrient, ascending=False).head(k)
+    else:
+        top = candidates.sort_values(by="ProteinValue", ascending=False).head(k)
+
+    return top[["description", "text", target_nutrient or "ProteinValue"]]
+
+
 
 
 if __name__ == "__main__":
-    # Pipeline completo
-    docs_df = build_docs()
-    index, vectorizer = build_tfidf_index(docs_df)
+    # Build pipeline
+    #docs = build_docs_wide()
+    #idx, vec = build_index(docs)
 
-    # Verificação de dados
-    print("\n🔍 Amostra de alimentos válidos:")
-    print(docs_df[['description', 'Protein', 'Total lipid (fat)', 'Energy']]
-          .sample(3, random_state=42)
-          .to_string(index=False))
-
-    # Busca otimizada
-    sample = retrieve_rag(
-        "fontes naturais de proteína magra",
-        k=3,
-        index=index,
-        vectorizer=vectorizer,
-        docs_df=docs_df
-    )
-
-    print("\n🔍 Top Recomendações:")
-    print(sample['formatted'].to_string(index=False))
+    # Test retrieval
+    sample = retrieve_rag("Boa fonte de vitamina e", k=4)
+    print("Top 3 RAG results:")
+    for _, row in sample.iterrows():
+        print(f"{row.description}\n{row.text}\n---")
