@@ -30,9 +30,9 @@ Regras de comunicação:
    - Quando fizeres comparações, segue este exemplo:
 
         Exemplo de tabela:
-        | Refeição      | Opção A                         | Opção B                         |
-        |---------------|---------------------------------|---------------------------------|
-        | Café da Manhã | Iogurte natural (150 kcal)      | Aveia + fruta (180 kcal)        |
+        | Refeição       | Opção A                         | Opção B                         |
+        |----------------|---------------------------------|---------------------------------|
+        | Pequeno-almoço | Iogurte natural (150 kcal)      | Aveia + fruta (180 kcal)        |
         ...
 
 E agora, sempre que pedirem, reproduz esse formato exatamente.

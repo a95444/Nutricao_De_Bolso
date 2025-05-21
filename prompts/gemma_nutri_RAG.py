@@ -178,9 +178,11 @@ class NutritionAssistant:
             return (
                     base +
                      "\n\nInstruções:\n" +
-                    "- Não incluas nenhum alimento que seja incluído no perfil como alergia, intolerância, que seja perigoso devido a condição médica ou uma preferência dietética negativa.\n" +
+                    "- Não incluas nenhum alimento que seja incluído no perfil como alergia, intolerância, que seja perigoso devido a condição médica ou que esteja como algo que o utilizador não goste.\n" +
                     "- Não incluas a mesma proteína ao almoço e jantar no mesmo dia, nem em dias seguidos para a mesma refeição.\n" +
+                    "- Se o perfil tiver especificado quando é que o utilizador tem treinos, adapta as refeições desses dias para irem de encontra às necessidades do treino. \n"+
                     "- Inclui quantidades e macronutrientes."
+
             )
         else:
             return ""
