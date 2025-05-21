@@ -4,6 +4,9 @@ import faiss
 import numpy as np
 import pickle
 import re
+from tabulate import tabulate  # Adicionado para formatação da tabela
+
+
 # Simple RAG pipeline for nutrition dataset
 
 def build_docs_wide(
@@ -12,6 +15,7 @@ def build_docs_wide(
         food_nutrient_csv="food_nutrient.csv",
         docs_path="docs_wide.pkl"
 ):
+    # [Manter o mesmo código anterior...]
     # 1) Definir categorias a considerar
     categories_filter = [3, 5, 6, 7, 8, 9, 10, 12, 13, 15, 16, 17, 19, 20, 22]
 
@@ -43,7 +47,6 @@ def build_docs_wide(
     )
 
     # 7) Reconstruir o campo 'text' para exibição
-    #    – Listamos cada nutriente com valor + unidade
     def make_text(row):
         lines = []
         for nut in pivot.columns[2:]:
@@ -59,6 +62,8 @@ def build_docs_wide(
     pivot.to_pickle(docs_path)
     print(f"✅ Documentos salvos em '{docs_path}' com {len(pivot)} itens.")
     return pivot
+
+
 def build_index(docs_df,
                 vectorizer_path="vectorizer.pkl",
                 index_path="index.faiss",
@@ -69,6 +74,7 @@ def build_index(docs_df,
     2. Build FAISS index
     3. Save vectorizer, index, and docs_df
     """
+    # [Manter o mesmo código anterior...]
     texts = docs_df["text"].tolist()
     vectorizer = TfidfVectorizer(max_features=max_features)
     tfidf = vectorizer.fit_transform(texts).astype(np.float32)
@@ -87,15 +93,16 @@ def build_index(docs_df,
     print(f"Saved vectorizer -> {vectorizer_path}, index -> {index_path}, docs -> {tfidf_path}")
     return index, vectorizer
 
-#versao boa para prota
+
 def retrieve_rag(
-    query, k=5,
-    vectorizer_path="vectorizer.pkl",
-    index_path="index.faiss",
-    tfidf_path="tfidf_docs.pkl",
-    min_protein=10.0,
-    min_nutrient=1.0
+        query, k=5,
+        vectorizer_path="vectorizer.pkl",
+        index_path="index.faiss",
+        tfidf_path="tfidf_docs.pkl",
+        min_protein=10.0,
+        min_nutrient=1.0
 ):
+    # [Manter o mesmo código anterior até a detecção do nutriente...]
     import pickle, faiss, pandas as pd, re
 
     # 1) Carregar artefatos
@@ -104,9 +111,9 @@ def retrieve_rag(
     index = faiss.read_index(index_path)
     docs_df = pd.read_pickle(tfidf_path)
 
-    # 2) Detectar nutriente na query (simplesmente procura “vitamina c”, “proteína”, “ferro”...)
+    # 2) Detectar nutriente na query
     nutrient_map = {
-        # Macronutrientes
+        # ... [Manter o mesmo mapeamento anterior] ...
         r"prote[íi]na": "Protein",
         r"lip[íi]dio(s)?": "Total lipid (fat)",
         r"gordur(a|as)": "Total lipid (fat)",
@@ -116,8 +123,6 @@ def retrieve_rag(
         r"energia": "Energy",
         r"caloria(s)?": "Energy",
         r"álcool": "Alcohol, ethyl",
-
-        # Minerais principais
         r"ferro": "Iron, Fe",
         r"c[áa]lcio": "Calcium, Ca",
         r"sódio": "Sodium, Na",
@@ -129,8 +134,6 @@ def retrieve_rag(
         r"s[ée]lenio": "Selenium, Se",
         r"magn[eê]sio": "Magnesium, Mg",
         r"manganês": "Manganese, Mn",
-
-        # Vitaminas
         r"vitamina\s*a\b": "Vitamin A, IU",
         r"vitamina\s*d\b": "Vitamin D (D2 + D3)",
         r"vitamina\s*e\b": "Vitamin E (alpha-tocopherol)",
@@ -144,67 +147,86 @@ def retrieve_rag(
         r"vitamina\s*b7\b": "Biotin",
         r"vitamina\s*b9\b": "Folate, total",
         r"vitamina\s*b12\b": "Vitamin B-12",
-
-        # Ácidos gordos
         r"trans": "Fatty acids, total trans",
         r"saturad[oa]s": "Fatty acids, total saturated",
         r"monoinsaturad[oa]s": "Fatty acids, total monounsaturated",
         r"poliinsaturad[oa]s": "Fatty acids, total polyunsaturated",
-
-        # Outros
         r"a[çc]úcar": "Sugars, Total",
         r"colesterol": "Cholesterol",
         r"agua|água": "Water",
         r"cinco principal": "Ash"
     }
 
-    def detect_nutrient(query: str):
-        for pattern, column in nutrient_map.items():
+    def detect_nutrients(query: str, max_hits=2):
+        hits = []
+        for pattern, col in nutrient_map.items():
             if re.search(pattern, query, flags=re.IGNORECASE):
-                return column
-        return None
+                hits.append(col)
+                if len(hits) >= max_hits:
+                    break
+        return hits
 
+    target_nutrients = detect_nutrients(query)
 
-    target_nutrient = detect_nutrient(query)
-
-    # 3) Expandir query para português e vetorizar
-    #query_pt = f"{query} proteína magra gordura baixa"
+    # 3) Vetorizar e recuperar candidatos
     q_vec = vectorizer.transform([query]).toarray().astype("float32")
-
-    # 4) Recuperar 20×k candidatos
     D, I = index.search(q_vec, k * 20)
     candidates = docs_df.iloc[I[0]].copy()
 
-    # 5) Extrair valores numéricos de nutrientes (passes a ter todas as colunas no docs_df!)
-    #    Aqui assumimos que tens uma coluna por nutriente, ex. docs_df["Vitamin C, total ascorbic acid"]
-    #    Se não tiveres, precisarás de parsear o campo "text" para extrair
-    if target_nutrient and target_nutrient in docs_df.columns:
-        # Filtrar quem tem valor >= min_nutrient nesse nutriente
-        #print(f"ESTÁ NA COLUNA {target_nutrient}")
-        candidates = candidates[candidates[target_nutrient] >= min_nutrient]
+    # 4) Filtrar pelos nutrientes detectados (ou proteína como fallback)
+    if target_nutrients:
+        for nut in target_nutrients:
+            if nut in candidates.columns:
+                candidates = candidates[candidates[nut].fillna(0) >= min_nutrient]
     else:
-        # Caso contrário, mantém o filtro de proteína original
         def extract_prot(text):
             m = re.search(r"Protein[:\s]+([\d.]+)", text)
             return float(m.group(1)) if m else 0.0
         candidates.loc[:, "ProteinValue"] = candidates["text"].apply(extract_prot)
         candidates = candidates[candidates["ProteinValue"] >= min_protein]
+        target_nutrients = ["ProteinValue"]
 
-    # 6) Aplicar blacklist/whitelist e deduplicação se quiseres
-    #    (igual ao que já tinhas: make_key + drop_duplicates)
+    # 5) Ordenar pelos nutrientes (dando prioridade ao primeiro, depois ao segundo se houver)
+    sort_by = [nut for nut in target_nutrients if nut in candidates.columns]
+    candidates = candidates.sort_values(by=sort_by, ascending=False)
 
-    # 7) Por fim, ordenar e devolver os top-k
-    #    Podes ordenar pelo valor do nutriente alvo, ou pela proteína se for fallback
-
-    # Exemplo de ordenação pelo nutriente alvo:
-    if target_nutrient and target_nutrient in docs_df.columns:
-        top = candidates.sort_values(by=target_nutrient, ascending=False).head(k)
-    else:
-        top = candidates.sort_values(by="ProteinValue", ascending=False).head(k)
-
-    return top[["description", "text", target_nutrient or "ProteinValue"]]
+    blacklist = r"bear|owl|game meat|herring|dried|canned|squirrel|ostrich"
+    mask_blacklist = ~candidates["description"].str.lower().str.contains(blacklist)
+    candidates = candidates[mask_blacklist]
 
 
+    # 6) **Deduplicar pela “primeira palavra” da descrição**
+    candidates.loc[:, "first_word"] = (
+        candidates["description"]
+        .str.split()
+        .str[0]
+        .str.lower()
+    )
+
+    candidates = candidates.drop_duplicates(subset="first_word")
+    candidates = candidates.drop(columns="first_word")
+    top = candidates.head(k)
+
+    # 8) Preparar colunas de saída
+    cols = ['description', 'Energy', 'Protein']
+    display_cols = {
+        'description': 'Alimento',
+        'Energy':      'Calorias (kcal)',
+        'Protein':     'Proteína (g)'
+    }
+
+    unit = None
+    for nut in sort_by:
+        cols.append(nut)
+        # extrair unidade do primeiro texto que tiver esse nutriente
+        for line in top['text'].iloc[0].split('\n'):
+            if line.startswith(nut + ':'):
+                unit = line.split()[-1]
+                break
+        display_cols[nut] = f"{nut} ({unit})" if unit else nut
+
+    result_df = top[cols].rename(columns=display_cols)
+    return result_df
 
 
 if __name__ == "__main__":
@@ -213,7 +235,10 @@ if __name__ == "__main__":
     #idx, vec = build_index(docs)
 
     # Test retrieval
-    sample = retrieve_rag("Boa fonte de vitamina e", k=4)
-    print("Top 3 RAG results:")
-    for _, row in sample.iterrows():
-        print(f"{row.description}\n{row.text}\n---")
+    sample = retrieve_rag(" Ótimo trabalho! Podes fazer agora uma tabela que compare diferentes alimentos ricos em Proteína e Ferro.", k=10)
+    print("Top 4 RAG results:\n")
+    # imprime toda a tabela de uma vez:
+    print(tabulate(sample,
+                   headers=sample.columns,
+                   tablefmt="psql",
+                   showindex=False))
