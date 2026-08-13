@@ -11,7 +11,7 @@ fn   = pd.read_csv("../prompts/food_nutrient.csv", usecols=["fdc_id", "nutrient_
 nutr.rename(columns={"id":"nutrient_id","name":"nutrient_name"}, inplace=True)
 
 # 3. Filtrar categorias básicas
-basic_cats = [4,5,6,7,8]  # Ajusta conforme o teu CSV
+basic_cats = [4,5,6,7,8] 
 food = food[food["food_category_id"].isin(basic_cats)]
 fn   = fn[fn["fdc_id"].isin(food["fdc_id"])]
 
@@ -36,4 +36,4 @@ docs_df = pd.DataFrame(docs)
 
 # 6. Guardar
 docs_df.to_pickle("fdc_docs.pkl")
-print(f"✅ Gerados {len(docs_df)} documentos em 'fdc_docs.pkl'")
+print(f"Gerados {len(docs_df)} documentos em 'fdc_docs.pkl'")
